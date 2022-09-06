@@ -1,15 +1,21 @@
 #![allow(dead_code)]
 
+use std::borrow::BorrowMut;
+use std::cell::RefCell;
 use std::io::Read;
-use std::fs::File;
+use std::fs::{File, remove_file};
 use crate::ConstTypes::*;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-struct Loader<T: Read> {
-    r: T
+static mut L: Loader = Loader{r: None, loaded_classes: None};
+
+struct Loader{
+    r: Option<File>,
+    loaded_classes: Option<HashMap<String, Class>>
 }
 
-impl<T: Read> Loader<T>{
+impl Loader{
     pub fn u1(&mut self) -> u8{
         return self.bytes::<1>()[0];
     }
@@ -24,14 +30,14 @@ impl<T: Read> Loader<T>{
 
     pub fn bytes<const N: usize>(&mut self) -> [u8; N]{
         let mut buf = [0 as u8; N];
-        self.r.read_exact(&mut buf[..]).unwrap();
+        self.r.as_ref().unwrap().read_exact(&mut buf[..]).unwrap();
         return buf;
     }
 
     pub fn vec_bytes(&mut self, n: usize) -> Vec<u8>{
         let mut vec = Vec::with_capacity(n);
         vec.resize(n, 0);
-        self.r.read_exact(&mut vec).unwrap();
+        self.r.as_ref().unwrap().read_exact(&mut vec).unwrap();
         return vec;
     }
 
@@ -46,9 +52,10 @@ impl<T: Read> Loader<T>{
     }
 
     fn resolve(&mut self, cp: &mut ConstPool, i: usize) -> String{
-        match &cp.consts[i - 1].data{
-            Str(s) => return s.clone(),
-            _ => return String::new()
+        return match &cp.consts[i - 1].data {
+            Str(s) => s.clone(),
+            Class(idx) => self.resolve(cp, *idx as usize),
+            _ => {println!("Ritorno stringa vuota");String::new()}
         }
     }
 
@@ -115,7 +122,12 @@ impl<T: Read> Loader<T>{
         return v;
     }
 
-    pub fn load_class(&mut self, hm: &mut HashMap<String, Class>) -> String{
+    pub fn load_class(&mut self, f: Option<File>) -> String{
+
+        if let Some(file) = f{
+            self.r = Some(file);
+        }
+
         assert_eq!(0xcafebabeu32, self.u4());
         println!("Java version: {}.{}", self.u2(), self.u2());
 
@@ -131,7 +143,7 @@ impl<T: Read> Loader<T>{
         let c = Class{
             cp,
             flags,
-            name,
+            name: name.clone(),
             supr,
             interfaces,
             fields,
@@ -139,8 +151,15 @@ impl<T: Read> Loader<T>{
             attributes
         };
 
-        hm.insert(name, c);
+        self.loaded_classes.as_mut().unwrap().insert(name.clone(), c);
         return name;
+    }
+
+    pub fn get_class(&mut self, name: String) -> &mut Class{
+        return match self.loaded_classes.as_mut().unwrap().get_mut(&name){
+            None => {panic!()}
+            Some(c) => {c}
+        };
     }
 }
 
@@ -150,6 +169,7 @@ struct Const{
     data: ConstTypes
 }
 
+#[derive(Debug)]
 struct Field{
     flags: u16,
     name: String,
@@ -157,6 +177,7 @@ struct Field{
     attr: Vec<Attribute>
 }
 
+#[derive(Debug)]
 struct Attribute{
     name: String,
     data: Vec<u8>
@@ -171,15 +192,15 @@ enum ConstTypes{
     FMIRef((u16, u16)),
     StrIndex(u16),
     NameAndType((u16, u16)),
-    
-
 }
 
 #[derive(Debug, Clone)]
 enum Types{
-    Int(i32)
+    Int(i32),
+    Void
 }
 
+#[derive(Debug)]
 struct ConstPool{
     consts: Vec<Const>
 }
@@ -187,9 +208,9 @@ struct ConstPool{
 impl ConstPool{
     pub fn resolve(&self, idx: u16) -> String{
         let idx = idx as usize;
-        if let Str(s) = &self.consts[idx-1].data {
-            return s.clone();
-        }else{ return String::from("");}
+        return if let Str(s) = &self.consts[idx - 1].data {
+            s.clone()
+        } else { String::from("") }
     }
 
     pub fn get(&self, idx:u16) -> Const{
@@ -200,12 +221,13 @@ impl ConstPool{
 
 struct Frame<'a>{
     class: &'a mut Class,
-    IP: u32,
+    ip: u32,
     code: Vec<u8>,
     locals: Vec<Types>,
     stack: Vec<Types>
 }
 
+#[derive(Debug)]
 struct Class{
     cp: ConstPool,
     name: String,
@@ -227,7 +249,7 @@ impl Class{
                         let max_locals = u16::from_be_bytes([a.data[2],a.data[3]]);
                         println!("max locals: {}", max_locals);
                         let mut frame = Frame{
-                            IP: 0,
+                            ip: 0,
                             code: a.data[8..].to_vec(),
                             locals: Vec::with_capacity(max_locals as usize),
                             stack: Vec::new(),
@@ -247,9 +269,9 @@ impl Class{
 }
 
 impl Frame<'_>{
-    pub fn exec(&mut self, mut lc: HashMap<String, Class>) -> Types{
+    pub fn exec(&mut self) -> Types{
         loop{
-            let op = self.code[self.IP as usize];
+            let op = self.code[self.ip as usize];
             println!{"Executing opcode {} with stack {:?}", op, self.stack};
 
             match op{
@@ -262,15 +284,22 @@ impl Frame<'_>{
                 8 => self.stack.push(Types::Int(5)),
                 26 => self.stack.push(self.locals[0].clone()),
                 27 => self.stack.push(self.locals[1].clone()),
+                87 => {self.stack.pop();},
                 96 => {
-                      let a = self.pop_int();
-                    let b = self.pop_int();
+                      let b = self.pop_int();
+                    let a = self.pop_int();
                     self.stack.push(Types::Int(a+b));
                 },
+                100 => {
+                    let a = self.pop_int();
+                    let b = self.pop_int();
+                    self.stack.push(Types::Int(a-b))
+                },
                 172 => return self.stack.pop().expect("Stack empty."),
-                184 => {
-                    let mut idx = u16::from_be_bytes([self.code[self.IP as usize+1], self.code[self.IP as usize+2]]);
-                    self.IP = self.IP + 2;
+                177 => return Types::Void,
+                184 => unsafe {
+                    let mut idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
 
                     let method = self.class.cp.get(idx);
                     if let FMIRef((class_idx, nat_idx)) = method.data{
@@ -281,27 +310,20 @@ impl Frame<'_>{
                                 //println!("{} {}, {}", self.class.cp.resolve(name), self.class.cp.resolve(typ), self.class.cp.resolve(clname));
 
                                 let clname = self.class.cp.resolve(clname_idx);
-
-                                let c = match lc.get_mut(&clname){
-                                    Some(c) => {
-                                        c
-                                    },
-                                    None => {
-                                        panic!();
-                                    }
-                                };
+                                let c = L.get_class(clname);
 
                                 let mut v: Vec<Types> = Vec::new(); 
                                 let typ = self.class.cp.resolve(typ_idx);
                                 for ch in typ.chars(){
                                     match ch{
                                         'I' => v.push(Types::Int(self.pop_int())),
-                                        ')' => break
+                                        ')' => break,
+                                        _ => {}
                                     }
                                 }
                                 v.reverse();
                                 let mut frame = c.frame(self.class.cp.resolve(name_idx), v);
-                                frame.exec(lc);
+                                self.stack.push(frame.exec());
                             }else{
                                 panic!("Corrupted Class");
                             }
@@ -314,7 +336,7 @@ impl Frame<'_>{
                 },
                 opc => panic!("Unimplemented opcode {}", opc)
             }
-            self.IP = self.IP + 1;
+            self.ip = self.ip + 1;
         }
     }
 
@@ -324,15 +346,18 @@ impl Frame<'_>{
 }
 
 fn main() -> std::io::Result<()> {
-    let mut l = Loader{r: File::open("Add.class")?};
+    unsafe{
+        L = Loader{
+            r: Some(File::open("Add.class").unwrap()),
+            loaded_classes: Some(HashMap::new())
+        }
+    }
 
-    let mut loaded_classes = HashMap::new();
+    let clname = unsafe { L.load_class(None)};
+    let c = unsafe{L.get_class(clname)};
 
-    let clname = l.load_class(&mut loaded_classes);
-    let mut class = loaded_classes.get_mut(&clname).expect("NoSuchClass");
-    let mut frame = class.frame(String::from("main"), vec!());
-
-    frame.exec(loaded_classes);
+    let mut frame = c.frame("main".to_string(), vec!());
+    frame.exec();
 
     Ok(())
 }
