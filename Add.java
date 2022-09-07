@@ -16,5 +16,8 @@ public class Add{
 	public static void main(String[] args){
 		Add(3, 4);
 		Sub(5, 3);
+
+		Add add = new Add();
+		add.add_test(6);
 	}
 }

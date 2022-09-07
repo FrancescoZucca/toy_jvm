@@ -1,12 +1,11 @@
 #![allow(dead_code)]
 
 use std::borrow::BorrowMut;
-use std::cell::RefCell;
 use std::io::Read;
-use std::fs::{File, remove_file};
+use std::fs::{File};
 use crate::ConstTypes::*;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::path::Path;
 
 static mut L: Loader = Loader{r: None, loaded_classes: None};
 
@@ -64,12 +63,21 @@ impl Loader{
         return self.resolve(cp, idx);
     }
 
+    fn resolve_super(&mut self, cp: &mut ConstPool) -> String{
+        let idx = self.u2();
+        return if idx == 0 {
+            "".to_string()
+        } else {
+            self.resolve(cp, idx as usize)
+        }
+    }
+
     fn cpinfo(&mut self) -> ConstPool{
         let mut cp = ConstPool{consts: Vec::new()};
         let cp_count = self.u2();
         for _ in 1..cp_count {
             let tag = self.u1();
-            let mut c: Const;
+            let c: Const;
             match tag{
                 0x01 => c = Const{tag, data:Str(String::from_utf8(self.vec_bytes_u2()).unwrap())},
                 0x03 => c = Const{tag, data:Int(i32::from_be_bytes(self.bytes()))},
@@ -103,7 +111,8 @@ impl Loader{
                 flags: self.u2(),
                 name: self.resolve_u2(cp),
                 desc: self.resolve_u2(cp),
-                attr: self.attributes(cp)
+                attr: self.attributes(cp),
+                value: None
             });
         }
         return v;
@@ -134,7 +143,7 @@ impl Loader{
         let mut cp = self.cpinfo();
         let flags = self.u2();
         let name = self.resolve_u2(&mut cp);
-        let supr = self.resolve_u2(&mut cp);
+        let supr = self.resolve_super(&mut cp);
         let interfaces = self.interfaces(&mut cp);
         let fields = self.fields(&mut cp);
         let methods = self.fields(&mut cp);
@@ -156,9 +165,25 @@ impl Loader{
     }
 
     pub fn get_class(&mut self, name: String) -> &mut Class{
-        return match self.loaded_classes.as_mut().unwrap().get_mut(&name){
-            None => {panic!()}
-            Some(c) => {c}
+
+        let paths = vec!(Path::new("./"), Path::new("./src/"));
+
+        let result = self.loaded_classes.as_ref().unwrap().get(&name);
+        return match result {
+            None => {
+                let mut clname = String::new();
+                for path in paths {
+                    match File::open(path.join(Path::new(&(name.clone()+".class")))) {
+                        Ok(file) => {clname = self.load_class(Some(file)); break;},
+                        Err(_) => continue
+                    }
+                }
+                if clname.is_empty(){
+                    panic!("NoSuchMethod");
+                }
+                self.loaded_classes.as_mut().unwrap().get_mut(&clname).unwrap()
+            }
+            Some(_) => { self.loaded_classes.as_mut().unwrap().get_mut(&name).unwrap() }
         };
     }
 }
@@ -169,15 +194,16 @@ struct Const{
     data: ConstTypes
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Field{
     flags: u16,
     name: String,
     desc: String,
-    attr: Vec<Attribute>
+    attr: Vec<Attribute>,
+    value: Option<Types>
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Attribute{
     name: String,
     data: Vec<u8>
@@ -197,22 +223,16 @@ enum ConstTypes{
 #[derive(Debug, Clone)]
 enum Types{
     Int(i32),
-    Void
+    Void,
+    Class(String)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ConstPool{
     consts: Vec<Const>
 }
 
 impl ConstPool{
-    pub fn resolve(&self, idx: u16) -> String{
-        let idx = idx as usize;
-        return if let Str(s) = &self.consts[idx - 1].data {
-            s.clone()
-        } else { String::from("") }
-    }
-
     pub fn get(&self, idx:u16) -> Const{
         let idx = (idx-1) as usize;
         return self.consts[idx].clone();
@@ -227,7 +247,7 @@ struct Frame<'a>{
     stack: Vec<Types>
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Class{
     cp: ConstPool,
     name: String,
@@ -269,6 +289,10 @@ impl Class{
 }
 
 impl Frame<'_>{
+    pub fn pop(&mut self) -> Types{
+        return self.stack.pop().expect("Stack empty");
+    }
+
     pub fn exec(&mut self) -> Types{
         loop{
             let op = self.code[self.ip as usize];
@@ -282,9 +306,27 @@ impl Frame<'_>{
                 6 => self.stack.push(Types::Int(3)),
                 7 => self.stack.push(Types::Int(4)),
                 8 => self.stack.push(Types::Int(5)),
+                16 => {
+                    self.ip = self.ip +1;
+                    let val = self.code[self.ip as usize];
+                    self.stack.push(Types::Int(val as i32))
+                }
                 26 => self.stack.push(self.locals[0].clone()),
                 27 => self.stack.push(self.locals[1].clone()),
+                42 => self.stack.push(self.locals[0].clone()),
+                43 => self.stack.push(self.locals[1].clone()),
+                44 => self.stack.push(self.locals[2].clone()),
+                45 => self.stack.push(self.locals[3].clone()),
+                75 => self.locals[0] = self.pop(),
+                76 => self.locals[1] = self.pop(),
+                77 => self.locals[2] = self.pop(),
+                78 => self.locals[3] = self.pop(),
                 87 => {self.stack.pop();},
+                89 => {
+                    let val = self.pop();
+                    self.stack.push(val.clone());
+                    self.stack.push(val);
+                },
                 96 => {
                       let b = self.pop_int();
                     let a = self.pop_int();
@@ -295,10 +337,153 @@ impl Frame<'_>{
                     let b = self.pop_int();
                     self.stack.push(Types::Int(a-b))
                 },
-                172 => return self.stack.pop().expect("Stack empty."),
+                172 => return self.pop(),
                 177 => return Types::Void,
+                180 => unsafe {
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
+
+                    let field = self.class.cp.get(idx);
+                    if let FMIRef((class_idx, nat_idx)) = field.data{
+                        let nat = self.class.cp.get(nat_idx);
+                        if let NameAndType((name_idx, typ_idx)) = nat.data {
+                            if let Class(clname_idx) = self.class.cp.get(class_idx).data{
+                                let c = L.get_class(L.resolve(&mut self.class.cp, clname_idx as usize));
+                                let value = self.pop();
+                                if let Types::Class(name) = value{
+                                    let cl = L.get_class(name);
+                                    println!("{:?}", cl.fields);
+                                    let fname = L.resolve(&mut self.class.cp, name_idx as usize);
+                                    let fdesc = L.resolve(&mut self.class.cp, typ_idx as usize);
+                                    for field in &mut cl.fields{
+                                        if field.name == fname && field.desc == fdesc{
+                                            self.stack.push(field.value.borrow_mut().clone().unwrap());
+                                            break;
+                                        }
+                                    }
+                                }
+                            }else{
+                                panic!("Corrupted Class");
+                            }
+                        }else{
+                            panic!("Corrupted Method Constant.");
+                        }
+                    }else{
+                        panic!("Tried to invoke a non-method constant");
+                    }
+                }
+                181 => unsafe{
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
+
+                    let field = self.class.cp.get(idx);
+                    if let FMIRef((class_idx, nat_idx)) = field.data{
+                        let nat = self.class.cp.get(nat_idx);
+                        if let NameAndType((name_idx, typ_idx)) = nat.data {
+                            if let Class(clname_idx) = self.class.cp.get(class_idx).data{
+                                let c = L.get_class(L.resolve(&mut self.class.cp, clname_idx as usize));
+                                let value = self.pop();
+                                if let Types::Class(name) = self.pop(){
+                                    let cl = L.get_class(name);
+                                    for field in &mut cl.fields{
+                                        if field.name == L.resolve(&mut self.class.cp, name_idx as usize) && field.desc == L.resolve(&mut self.class.cp, typ_idx as usize){
+                                            field.value = Some(value);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }else{
+                                panic!("Corrupted Class");
+                            }
+                        }else{
+                            panic!("Corrupted Method Constant.");
+                        }
+                    }else{
+                        panic!("Tried to invoke a non-method constant");
+                    }
+                },
+                182 => unsafe {
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
+
+                    let method = self.class.cp.get(idx);
+                    if let FMIRef((class_idx, nat_idx)) = method.data{
+                        let nat = self.class.cp.get(nat_idx);
+                        if let NameAndType((name_idx, typ_idx)) = nat.data {
+                            if let Class(clname_idx) = self.class.cp.get(class_idx).data{
+
+                                let clname = L.resolve(&mut self.class.cp, clname_idx as usize);
+                                println!("Resolving class {}..", clname);
+                                let c = L.get_class(clname);
+
+                                let mut v: Vec<Types> = Vec::new();
+                                let typ = L.resolve(&mut self.class.cp, typ_idx as usize);
+                                for ch in typ.chars(){
+                                    match ch{
+                                        'I' => v.push(Types::Int(self.pop_int())),
+                                        ')' => break,
+                                        _ => {}
+                                    }
+                                }
+                                v.push(self.pop());
+                                v.reverse();
+                                let mut frame = c.frame(L.resolve(&mut self.class.cp, name_idx as usize), v);
+                                match frame.exec() {
+                                    Types::Void => {},
+                                    val => self.stack.push(val)
+                                }
+                            }else{
+                                panic!("Corrupted Class");
+                            }
+                        }else{
+                            panic!("Corrupted Method Constant.");
+                        }
+                    }else{
+                        panic!("Tried to invoke a non-method constant");
+                    }
+                },
+                183 => unsafe {
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
+
+                    let method = self.class.cp.get(idx);
+                    if let FMIRef((class_idx, nat_idx)) = method.data{
+                        let nat = self.class.cp.get(nat_idx);
+                        if let NameAndType((name_idx, typ_idx)) = nat.data {
+                            if let Class(clname_idx) = self.class.cp.get(class_idx).data{
+
+                                let clname = L.resolve(&mut self.class.cp, clname_idx as usize);
+                                println!("Resolving class {}..", clname);
+                                let c = L.get_class(clname);
+
+                                let mut v: Vec<Types> = Vec::new();
+                                let typ = L.resolve(&mut self.class.cp, typ_idx as usize);
+                                for ch in typ.chars(){
+                                    match ch{
+                                        'I' => v.push(Types::Int(self.pop_int())),
+                                        ')' => break,
+                                        _ => {}
+                                    }
+                                }
+                                v.push(self.pop());
+                                v.reverse();
+                                let mut frame = c.frame(L.resolve(&mut self.class.cp, name_idx as usize), v);
+                                match frame.exec() {
+                                    Types::Void => {},
+                                    val => self.stack.push(val)
+                                }
+                            }else{
+                                panic!("Corrupted Class");
+                            }
+                        }else{
+                            panic!("Corrupted Method Constant.");
+                        }
+                    }else{
+                        panic!("Tried to invoke a non-method constant");
+                    }
+                },
                 184 => unsafe {
-                    let mut idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
                     self.ip = self.ip + 2;
 
                     let method = self.class.cp.get(idx);
@@ -309,11 +494,11 @@ impl Frame<'_>{
                                 //println!("{}, {}, {}", name_idx, typ_idx, clname_idx);
                                 //println!("{} {}, {}", self.class.cp.resolve(name), self.class.cp.resolve(typ), self.class.cp.resolve(clname));
 
-                                let clname = self.class.cp.resolve(clname_idx);
+                                let clname = L.resolve(&mut self.class.cp, clname_idx as usize);
                                 let c = L.get_class(clname);
 
                                 let mut v: Vec<Types> = Vec::new(); 
-                                let typ = self.class.cp.resolve(typ_idx);
+                                let typ = L.resolve(&mut self.class.cp, typ_idx as usize);
                                 for ch in typ.chars(){
                                     match ch{
                                         'I' => v.push(Types::Int(self.pop_int())),
@@ -322,8 +507,11 @@ impl Frame<'_>{
                                     }
                                 }
                                 v.reverse();
-                                let mut frame = c.frame(self.class.cp.resolve(name_idx), v);
-                                self.stack.push(frame.exec());
+                                let mut frame = c.frame(L.resolve(&mut self.class.cp, name_idx as usize), v);
+                                match frame.exec() {
+                                    Types::Void => {},
+                                    val => self.stack.push(val)
+                                }
                             }else{
                                 panic!("Corrupted Class");
                             }
@@ -332,6 +520,17 @@ impl Frame<'_>{
                         }
                     }else{
                         panic!("Tried to invoke a non-method constant");
+                    }
+                },
+                187 => unsafe {
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
+
+                    if let Class(class_idx) = self.class.cp.get(idx).data {
+                        let class = L.get_class(L.resolve(&mut self.class.cp, class_idx as usize));
+                        self.stack.push(Types::Class(class.name.clone()))
+                    }else{
+                        panic!("Tried instantiating a non-class");
                     }
                 },
                 opc => panic!("Unimplemented opcode {}", opc)
