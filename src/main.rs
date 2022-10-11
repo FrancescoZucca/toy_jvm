@@ -7,6 +7,8 @@ use crate::ConstTypes::*;
 use std::collections::HashMap;
 use std::path::Path;
 
+mod opcodes;
+
 static mut L: Loader = Loader{r: None, loaded_classes: None};
 
 struct Loader{
@@ -335,7 +337,7 @@ impl Frame<'_>{
                 100 => {
                     let a = self.pop_int();
                     let b = self.pop_int();
-                    self.stack.push(Types::Int(a-b))
+                    self.stack.push(Types::Int(b-a))
                 },
                 172 => return self.pop(),
                 177 => return Types::Void,
