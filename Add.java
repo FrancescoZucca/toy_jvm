@@ -15,14 +15,13 @@ public class Add{
 		return a + test;
 	}
 
-	public static void main(String[] args){
+	public static void main(String[] args) throws NullPointerException, IndexOutOfBoundsException{
 		Add(3, 4);
 		Sub(5, 3);
 		Add(5.5d, 4.3d);
 
-		int[] ints = new int[3];
-
 		Add add = new Add();
-		add.add_test(6);
+		int[] ints = {0, 1, 2};
+		System.out.println(Add(ints[1], ints[2]));
 	}
 }

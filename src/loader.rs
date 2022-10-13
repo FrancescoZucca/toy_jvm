@@ -47,7 +47,7 @@ impl Loader{
         return self.vec_bytes(num);
     }
 
-    pub(crate) fn resolve(&mut self, cp: &mut ConstPool, i: usize) -> String{
+    pub(crate) fn resolve(&self, cp: &ConstPool, i: usize) -> String{
         return match &cp.consts[i - 1].data {
             ConstTypes::Str(s) => s.clone(),
             ConstTypes::Class(idx) => self.resolve(cp, *idx as usize),

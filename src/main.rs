@@ -1,14 +1,13 @@
 #![allow(dead_code)]
 
+extern crate core;
+
 use std::borrow::BorrowMut;
-use std::io::Read;
 use std::fs::{File};
 use std::collections::HashMap;
-use std::path::Path;
-use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use opcodes::Opcodes::*;
-use crate::types::{ArrayTypes, Attribute, ConstPool, ConstTypes, Field, Types};
+use crate::types::{ArrayTypes, Attribute, Const, ConstPool, ConstTypes, Field, Types};
 use crate::loader::Loader;
 use crate::opcodes::Opcodes;
 use crate::Types::*;
@@ -25,7 +24,8 @@ pub struct Frame<'a>{
     ip: u32,
     code: Vec<u8>,
     locals: Vec<Types>,
-    stack: Vec<Types>
+    stack: Vec<Types>,
+    arrays: Vec<Vec<Types>>
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +54,8 @@ impl Class{
                             code: a.data[8..].to_vec(),
                             locals: Vec::with_capacity(max_locals as usize),
                             stack: Vec::new(),
-                            class: self
+                            class: self,
+                            arrays: Vec::new(),
                         };
                         frame.locals.resize(max_locals.into(), Int(0));
                         for (i, item) in args.iter().enumerate(){
@@ -65,7 +66,7 @@ impl Class{
                 }
             }
         }
-        panic!("Method not found!");
+        panic!("Method {}:{} not found in class {}!", method, desc, self.name);
     }
 }
 
@@ -99,10 +100,30 @@ impl Frame<'_>{
                 ILOAD_1 | DLOAD_1 | ALOAD_1 => self.stack.push(self.locals[1].clone()),
                 ILOAD_2 | DLOAD_2 | ALOAD_2 => self.stack.push(self.locals[2].clone()),
                 ILOAD_3 | DLOAD_3 | ALOAD_3 => self.stack.push(self.locals[3].clone()),
-                ASTORE_0 => self.locals[0] = self.pop(),
-                ASTORE_1 => self.locals[1] = self.pop(),
-                ASTORE_2 => self.locals[2] = self.pop(),
-                ASTORE_3 => self.locals[3] = self.pop(),
+                ASTORE_0 | ISTORE_0 => self.locals[0] = self.pop(),
+                ASTORE_1 | ISTORE_1 => self.locals[1] = self.pop(),
+                ASTORE_2 | ISTORE_2 => self.locals[2] = self.pop(),
+                ASTORE_3 | ISTORE_3 => self.locals[3] = self.pop(),
+                IASTORE => {
+                    let val = self.pop();
+                    let idx = self.pop_int() as usize;
+                    let array_ref = self.pop();
+                    if let Array((a_idx, typ)) = array_ref{
+                        self.arrays[a_idx][idx] = val;
+                    }else{
+                        panic!("Invalid Array.");
+                    }
+                },
+                IALOAD => {
+                    let idx = self.pop_int() as usize;
+                    let array_ref = self.pop();
+
+                    if let Array((a_idx, typ)) = array_ref{
+                        self.stack.push(self.arrays[a_idx][idx].clone());
+                    }else{
+                        panic!("Invalid array.");
+                    }
+                },
                 POP => {self.stack.pop();},
                 POP2 => {
                     let val = self.pop();
@@ -136,6 +157,25 @@ impl Frame<'_>{
                     let b = self.pop_double();
                     self.stack.push(Double(b-a));
                 },
+                LDC => unsafe{
+                    let idx = self.code[self.ip as usize + 1];
+                    self.ip += 1;
+
+                    match self.class.cp.get(idx as u16).data {
+                        ConstTypes::Str(s) => { self.stack.push(Str(s)) }
+                        ConstTypes::Int(i) => { self.stack.push(Int(i)) }
+                        ConstTypes::Float(f) => { self.stack.push(Float(f)) }
+                        ConstTypes::Class(name_idx) => {
+                            let class = L.get_class(L.resolve(&self.class.cp, name_idx as usize));
+                            self.stack.push(Class(class.name.clone()));
+                        }
+                        ConstTypes::FMIRef(fmi) => {
+                            let (clname, name, desc) = self.handle_fmi(ConstTypes::FMIRef(fmi));
+                            unimplemented!()
+                        }
+                        _ => panic!()
+                    }
+                }
                 LDC2_W => {
                     let high = self.code[self.ip as usize + 1];
                     let low = self.code[self.ip as usize + 2];
@@ -150,6 +190,25 @@ impl Frame<'_>{
                         self.stack.push(Long(*l))
                     }else{
                         println!("Called LDC2_W on a NON-LONG! Ignoring...");
+                    }
+                },
+                IFGE => {
+                    let offset = u16::from_be_bytes([self.code[self.ip as usize + 1], self.code[self.ip as usize + 2]]);
+                    let a = self.pop_int();
+                    if a >= 0{
+                        self.ip += offset as u32 - 1;
+                    }else{
+                        self.ip += 2;
+                    }
+                },
+                IF_ICMPNE => {
+                    let offset = u16::from_be_bytes([self.code[self.ip as usize + 1], self.code[self.ip as usize + 2]]);
+                    let a = self.pop_int();
+                    let b = self.pop_int();
+                    if a != b{
+                        self.ip += offset as u32 - 1;
+                    }else{
+                        self.ip += 2;
                     }
                 },
                 IRETURN | DRETURN | LRETURN | ARETURN | FRETURN => return self.pop(),
@@ -215,6 +274,21 @@ impl Frame<'_>{
                         }
                     }else{
                         panic!("Tried to invoke a non-method constant");
+                    }
+                },
+                GETSTATIC => unsafe{ //TODO: Properly initialise values.
+                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
+                    self.ip = self.ip + 2;
+
+                    let field_ref = self.class.cp.get(idx);
+                    let (clname, fname, ftype) = self.handle_fmi(field_ref.data);
+                    let class = L.get_class(clname);
+                    for field in &class.fields{
+                        if field.name == fname && field.desc == ftype{
+                            println!("{}, {}-{} : {:?}", self.class.name, field.name, field.desc, field.value);
+                            self.stack.push(field.clone().value.unwrap_or(Void));
+                            break;
+                        }
                     }
                 },
                 INVOKEVIRTUAL => unsafe {
@@ -351,8 +425,16 @@ impl Frame<'_>{
                 },
                 NEWARRAY => {
                     let typ: ArrayTypes = FromPrimitive::from_u8(self.code[self.ip as usize + 1]).unwrap();
+                    self.ip += 1;
+
                     let count = self.pop_int();
-                    self.stack.push(Array((Vec::<Types>::with_capacity(count as usize), typ)));
+                    let mut v = Vec::<Types>::with_capacity(count as usize);
+                    v.resize(count as usize, Void);
+
+                    self.arrays.push(v);
+                    let idx = self.arrays.len() - 1;
+
+                    self.stack.push(Array((idx, typ)));
                 }
                 opc => panic!("Unimplemented opcode {:?}", opc)
             }
@@ -366,6 +448,30 @@ impl Frame<'_>{
 
     fn pop_double(&mut self) -> f64{
         return if let Double(f) = self.pop(){f}else{panic!("Expected double on the stack")}
+    }
+
+    fn handle_fmi(&self, fmi_ref: ConstTypes) -> (String, String, String){
+        if let ConstTypes::FMIRef((class_idx, nat_idx)) = fmi_ref{
+            let nat = self.class.cp.get(nat_idx).data;
+            if let ConstTypes::NameAndType((name_idx, type_idx)) = nat{
+                let class = self.class.cp.get(class_idx).data;
+                if let ConstTypes::Class(clname_idx) = class {
+                    unsafe{
+                        let clname = L.resolve(&self.class.cp, clname_idx as usize);
+                        let name = L.resolve(&self.class.cp, name_idx as usize);
+                        let typ = L.resolve(&self.class.cp, type_idx as usize);
+
+                        return (clname, name, typ);
+                    }
+                }else{
+                    panic!("Expected Class.");
+                }
+            }else{
+                panic!("Expected NAT.");
+            }
+        }else{
+            panic!("Expected FMI ref.");
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use num_derive::FromPrimitive;
 
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Copy, Clone, Debug)]
 pub enum ArrayTypes{
     BOOLEAN = 4,
     CHAR,
@@ -11,9 +11,6 @@ pub enum ArrayTypes{
     INT,
     LONG
 }
-
-
-
 
 #[derive(Debug, Clone)]
 pub struct Const{
@@ -58,8 +55,9 @@ pub enum Types{
     Long(i64),
     Void,
     Class(String),
-    Array((Vec<Types>, ArrayTypes)),
-    Boolean(bool)
+    Array((usize, ArrayTypes)),
+    Boolean(bool),
+    Str(String)
 }
 
 #[derive(Debug, Clone)]
