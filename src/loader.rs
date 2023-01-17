@@ -1,10 +1,11 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use crate::{Class, ConstTypes};
 use crate::types::ConstTypes::*;
-use crate::types::{Attribute, Const, ConstPool, Field};
+use crate::types::{Attribute, Const, ConstPool, Field, MethodAccessFlags};
 
 pub struct Loader{
     pub(crate) r: Option<File>,
@@ -143,7 +144,8 @@ impl Loader{
         }
 
         assert_eq!(0xcafebabeu32, self.u4());
-        println!("Java version: {}.{}", self.u2(), self.u2());
+        let version = [self.u2(), self.u2()];
+        println!("Java version: {:?}", version);
 
         let mut cp = self.cpinfo();
         let flags = self.u2();
@@ -162,18 +164,35 @@ impl Loader{
             interfaces,
             fields,
             methods,
-            attributes
+            attributes,
+            version
         };
 
         self.loaded_classes.as_mut().unwrap().insert(name.clone(), c);
+
+        let c = self.loaded_classes.as_mut().unwrap().get_mut(name.clone().as_str()).unwrap();
+
+        for m in &c.methods{
+            if m.name == "<clinit>" && m.desc == "()V"{
+                if version[0] >= 51{
+                    let flags = MethodAccessFlags::new(m.flags);
+                    if !flags.STATIC{ continue; }
+                }
+
+                c.frame(m.name.clone(), m.desc.clone(), Vec::new()).exec();
+                break;
+            }
+        }
         return name;
     }
 
     pub fn get_class(&mut self, name: String) -> &mut Class{
 
+        println!("Fetching class {}..", name);
+
         let paths = vec!(Path::new("./"), Path::new("./src/"));
 
-        let result = self.loaded_classes.as_ref().unwrap().get(&name);
+        let result = self.loaded_classes.as_mut().unwrap().get(&name);
         return match result {
             None => {
                 let mut clname = String::new();

@@ -7,7 +7,7 @@ use std::fs::{File};
 use std::collections::HashMap;
 use num_traits::FromPrimitive;
 use opcodes::Opcodes::*;
-use crate::types::{ArrayTypes, Attribute, Const, ConstPool, ConstTypes, Field, Types};
+use crate::types::{ArrayTypes, Attribute, ConstPool, ConstTypes, Field, MethodAccessFlags, Types};
 use crate::loader::Loader;
 use crate::opcodes::Opcodes;
 use crate::Types::*;
@@ -15,6 +15,7 @@ use crate::Types::*;
 mod opcodes;
 mod types;
 pub mod loader;
+mod natives;
 
 static mut L: Loader = Loader{r: None, loaded_classes: None};
 
@@ -25,7 +26,9 @@ pub struct Frame<'a>{
     code: Vec<u8>,
     locals: Vec<Types>,
     stack: Vec<Types>,
-    arrays: Vec<Vec<Types>>
+    arrays: Vec<Vec<Types>>,
+    native: bool,
+    native_fn: Option<&'a fn(&crate::Class, Vec<Types>) -> Types>
 }
 
 #[derive(Debug, Clone)]
@@ -37,14 +40,32 @@ pub struct Class{
     interfaces: Vec<String>,
     fields: Vec<Field>,
     methods: Vec<Field>,
-    attributes: Vec<Attribute>
+    attributes: Vec<Attribute>,
+    version: [u16; 2]
 }
 
 impl Class{
     pub fn frame(&mut self, method: String, desc: String, args: Vec<Types>) -> Frame{
-        println!("Loading method {} with locals {:?}", method, args);
+        println!("Loading method {}::{} with locals {:?}",self.name, method, args);
         for m in &self.methods{
             if m.name == method && m.desc == desc{
+                if MethodAccessFlags::new(m.flags).NATIVE{
+                    println!("Loading native...");
+                    unsafe {
+                        if let Some(n) = &mut natives::NATIVES {
+                            return Frame {
+                                native_fn: Some(n.get(&(self.name.clone(), m.name.clone(), m.desc.clone())).unwrap()),
+                                class: self,
+                                ip: 0,
+                                code: vec![],
+                                locals: args,
+                                stack: vec![],
+                                arrays: vec![],
+                                native: true,
+                            }
+                        }
+                    }
+                }
                 for a in &m.attr{
                     if a.name == "Code" && a.data.len() > 8{
                         let max_locals = u16::from_be_bytes([a.data[2],a.data[3]]);
@@ -56,6 +77,8 @@ impl Class{
                             stack: Vec::new(),
                             class: self,
                             arrays: Vec::new(),
+                            native: false,
+                            native_fn: None
                         };
                         frame.locals.resize(max_locals.into(), Int(0));
                         for (i, item) in args.iter().enumerate(){
@@ -76,6 +99,11 @@ impl Frame<'_>{
     }
 
     pub fn exec(&mut self) -> Types{
+
+        if self.native{
+            return self.native_fn.unwrap()(self.class, self.locals.clone());
+        }
+
         loop{
             let op: Opcodes = FromPrimitive::from_u8(self.code[self.ip as usize]).expect("Invalid opcode.");
             println!{"Executing opcode {:?} ({}) with stack {:?}", op, op as u8, self.stack};
@@ -138,7 +166,7 @@ impl Frame<'_>{
                     self.stack.push(val);
                 },
                 IADD => {
-                      let b = self.pop_int();
+                    let b = self.pop_int();
                     let a = self.pop_int();
                     self.stack.push(Int(a+b));
                 },
@@ -177,11 +205,7 @@ impl Frame<'_>{
                     }
                 }
                 LDC2_W => {
-                    let high = self.code[self.ip as usize + 1];
-                    let low = self.code[self.ip as usize + 2];
-                    self.ip += 2;
-
-                    let idx = ((high as u16) << 8) | low as u16;
+                    let idx = u16::from_be_bytes(self.read_bytes());
                     let val = &self.class.cp.consts[idx as usize - 1].data;
                     println!("{:?}", val);
                     if let ConstTypes::Double(i) = val{
@@ -193,7 +217,7 @@ impl Frame<'_>{
                     }
                 },
                 IFGE => {
-                    let offset = u16::from_be_bytes([self.code[self.ip as usize + 1], self.code[self.ip as usize + 2]]);
+                    let offset = u16::from_be_bytes(self.read_bytes());
                     let a = self.pop_int();
                     if a >= 0{
                         self.ip += offset as u32 - 1;
@@ -202,7 +226,7 @@ impl Frame<'_>{
                     }
                 },
                 IF_ICMPNE => {
-                    let offset = u16::from_be_bytes([self.code[self.ip as usize + 1], self.code[self.ip as usize + 2]]);
+                    let offset = u16::from_be_bytes(self.read_bytes());
                     let a = self.pop_int();
                     let b = self.pop_int();
                     if a != b{
@@ -214,36 +238,16 @@ impl Frame<'_>{
                 IRETURN | DRETURN | LRETURN | ARETURN | FRETURN => return self.pop(),
                 RETURN => return Void,
                 GETFIELD => unsafe {
-                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
-                    self.ip = self.ip + 2;
+                    let idx = u16::from_be_bytes(self.read_bytes());
 
-                    let field = self.class.cp.get(idx);
-                    if let ConstTypes::FMIRef((class_idx, nat_idx)) = field.data{
-                        let nat = self.class.cp.get(nat_idx);
-                        if let ConstTypes::NameAndType((name_idx, typ_idx)) = nat.data {
-                            if let ConstTypes::Class(clname_idx) = self.class.cp.get(class_idx).data{
-                                let c = L.get_class(L.resolve(&mut self.class.cp, clname_idx as usize));
-                                let value = self.pop();
-                                if let Types::Class(name) = value{
-                                    let cl = L.get_class(name);
-                                    println!("{:?}", cl.fields);
-                                    let fname = L.resolve(&mut self.class.cp, name_idx as usize);
-                                    let fdesc = L.resolve(&mut self.class.cp, typ_idx as usize);
-                                    for field in &mut cl.fields{
-                                        if field.name == fname && field.desc == fdesc{
-                                            self.stack.push(field.value.borrow_mut().clone().unwrap());
-                                            break;
-                                        }
-                                    }
-                                }
-                            }else{
-                                panic!("Corrupted Class");
-                            }
-                        }else{
-                            panic!("Corrupted Method Constant.");
+                    let field = self.class.cp.get(idx).data;
+                    let (clname, fname, fdesc) = self.handle_fmi(field);
+                    let cl = L.get_class(clname);
+                    println!("{:?}", cl.fields);for field in &mut cl.fields{
+                        if field.name == fname && field.desc == fdesc{
+                            self.stack.push(field.value.borrow_mut().clone().unwrap());
+                            break;
                         }
-                    }else{
-                        panic!("Tried to invoke a non-method constant");
                     }
                 }
                 PUTFIELD => unsafe{
@@ -277,17 +281,21 @@ impl Frame<'_>{
                     }
                 },
                 GETSTATIC => unsafe{ //TODO: Properly initialise values.
-                    let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
-                    self.ip = self.ip + 2;
+                    println!("{}", self.class.name);
+                    let idx = u16::from_be_bytes(self.read_bytes());
+                    println!("sus {} out of {}", idx, self.class.cp.consts.len());
 
                     let field_ref = self.class.cp.get(idx);
+                    println!("come");
                     let (clname, fname, ftype) = self.handle_fmi(field_ref.data);
+                    println!("{}: {}-{}", clname, fname, ftype);
                     let class = L.get_class(clname);
                     for field in &class.fields{
                         if field.name == fname && field.desc == ftype{
                             println!("{}, {}-{} : {:?}", self.class.name, field.name, field.desc, field.value);
                             self.stack.push(field.clone().value.unwrap_or(Void));
                             break;
+
                         }
                     }
                 },
@@ -295,40 +303,25 @@ impl Frame<'_>{
                     let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
                     self.ip = self.ip + 2;
 
-                    let method = self.class.cp.get(idx);
-                    if let ConstTypes::FMIRef((class_idx, nat_idx)) = method.data{
-                        let nat = self.class.cp.get(nat_idx);
-                        if let ConstTypes::NameAndType((name_idx, typ_idx)) = nat.data {
-                            if let ConstTypes::Class(clname_idx) = self.class.cp.get(class_idx).data{
+                    let method = self.class.cp.get(idx).data;
+                    let (clname, mname, typ) = self.handle_fmi(method);
+                    println!("Resolving class {}..", clname);
+                    let c = L.get_class(clname);
 
-                                let clname = L.resolve(&mut self.class.cp, clname_idx as usize);
-                                println!("Resolving class {}..", clname);
-                                let c = L.get_class(clname);
-
-                                let mut v: Vec<Types> = Vec::new();
-                                let typ = L.resolve(&mut self.class.cp, typ_idx as usize);
-                                for ch in typ.chars(){
-                                    match ch{
-                                        'I' => v.push(Int(self.pop_int())),
-                                        ')' => break,
-                                        _ => {}
-                                    }
-                                }
-                                v.push(self.pop());
-                                v.reverse();
-                                let mut frame = c.frame(L.resolve(&mut self.class.cp, name_idx as usize), typ, v);
-                                match frame.exec() {
-                                    Void => {},
-                                    val => self.stack.push(val)
-                                }
-                            }else{
-                                panic!("Corrupted Class");
-                            }
-                        }else{
-                            panic!("Corrupted Method Constant.");
+                    let mut v: Vec<Types> = Vec::new();
+                    for ch in typ.chars(){
+                        match ch{
+                            'I' => v.push(Int(self.pop_int())),
+                            ')' => break,
+                            _ => {}
                         }
-                    }else{
-                        panic!("Tried to invoke a non-method constant");
+                    }
+                    v.push(self.pop());
+                    v.reverse();
+                    let mut frame = c.frame(mname, typ, v);
+                    match frame.exec() {
+                        Void => {},
+                        val => self.stack.push(val)
                     }
                 },
                 INVOKESPECIAL => unsafe {
@@ -386,7 +379,7 @@ impl Frame<'_>{
                                 let clname = L.resolve(&mut self.class.cp, clname_idx as usize);
                                 let c = L.get_class(clname);
 
-                                let mut v: Vec<Types> = Vec::new(); 
+                                let mut v: Vec<Types> = Vec::new();
                                 let typ = L.resolve(&mut self.class.cp, typ_idx as usize);
                                 for ch in typ.chars(){
                                     match ch{
@@ -416,6 +409,7 @@ impl Frame<'_>{
                     let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
                     self.ip = self.ip + 2;
 
+                    println!("...test");
                     if let ConstTypes::Class(class_idx) = self.class.cp.get(idx).data {
                         let class = L.get_class(L.resolve(&mut self.class.cp, class_idx as usize));
                         self.stack.push(Types::Class(class.name.clone()))
@@ -473,6 +467,15 @@ impl Frame<'_>{
             panic!("Expected FMI ref.");
         }
     }
+
+    fn read_bytes<const T: usize>(&mut self) -> [u8; T]{
+        let mut r = [0u8; T];
+        for i in 0..T{
+            r[i] = self.code[self.ip as usize + 1];
+            self.ip += 1;
+        }
+        return r;
+    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -482,6 +485,8 @@ fn main() -> std::io::Result<()> {
             loaded_classes: Some(HashMap::new())
         }
     }
+
+    natives::load_natives();
 
     let clname = unsafe { L.load_class(None)};
     let c = unsafe{L.get_class(clname)};

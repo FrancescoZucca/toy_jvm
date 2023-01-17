@@ -71,3 +71,44 @@ impl ConstPool{
         return self.consts[idx].clone();
     }
 }
+
+#[allow(non_snake_case)]
+pub struct MethodAccessFlags{
+    pub PUBLIC: bool,
+    pub PRIVATE: bool,
+    pub PROTECTED: bool,
+    pub STATIC: bool,
+    pub FINAL: bool,
+    pub SYNCHRONIZED: bool,
+    pub BRIDGE: bool,
+    pub VARARGS: bool,
+    pub NATIVE: bool,
+    pub ABSTRACT: bool,
+    pub STRICT: bool,
+    pub SYNTHETIC: bool
+}
+
+impl MethodAccessFlags{
+    pub fn new(flags: u16) -> Self{
+        let f = Self{
+            PUBLIC: flags & 0x1 != 0,
+            PRIVATE: flags & 0x2 != 0,
+            PROTECTED: flags & 0x4 != 0,
+            STATIC: flags & 0x8 != 0,
+            FINAL: flags & 0x10 != 0,
+            SYNCHRONIZED: flags & 0x20 != 0,
+            BRIDGE: flags & 0x40 != 0,
+            VARARGS: flags & 0x80 != 0,
+            NATIVE: flags & 0x100 != 0,
+            ABSTRACT: flags & 0x400 != 0,
+            STRICT: flags & 0x800 != 0,
+            SYNTHETIC: flags & 0x1000 != 0
+        };
+
+        if f.PUBLIC && f.PRIVATE || f.PUBLIC && f.PROTECTED || f.PRIVATE && f.PROTECTED{
+            panic!("Invalid flags.");
+        }
+
+        f
+    }
+}
