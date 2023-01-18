@@ -242,9 +242,10 @@ impl Frame<'_>{
 
                     let field = self.class.cp.get(idx);
                     let (clname, fname, fdesc) = self.handle_fmi(field);
-                    let cl = L.get_class(clname);
+                    let cl = L.get_class(clname.clone());
                     println!("{:?}", cl.fields);for field in &mut cl.fields{
                         if field.name == fname && field.desc == fdesc{
+                            println!("{}::{}-{} = {:?}", clname, fname, fdesc, field.value.clone());
                             self.stack.push(field.value.borrow_mut().clone().unwrap());
                             break;
                         }
@@ -299,10 +300,12 @@ impl Frame<'_>{
                 PUTSTATIC => unsafe{
                     let idx = u16::from_be_bytes(self.read_bytes());
                     let (clname, fname, ftype) = self.handle_fmi(self.class.cp.get(idx));
-                    let cl = L.get_class(clname);
+                    let cl = L.get_class(clname.clone());
                     for field in &mut cl.fields{
                         if field.name == fname && field.desc == ftype{
-                            field.value = Some(self.pop());
+                            let val = self.pop();
+                            println!("{}::{} set to {:?}", clname, fname, val);
+                            field.value = Some(val);
                             break;
                         }
                     }
