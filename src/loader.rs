@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use crate::{Class, ConstTypes};
-use crate::types::ConstTypes::*;
+use crate::{Class};
 use crate::types::{Attribute, Const, ConstPool, Field, MethodAccessFlags};
 
 pub struct Loader{
@@ -49,9 +48,9 @@ impl Loader{
     }
 
     pub(crate) fn resolve(&self, cp: &ConstPool, i: usize) -> String{
-        return match &cp.consts[i - 1].data {
-            ConstTypes::Str(s) => s.clone(),
-            ConstTypes::Class(idx) => self.resolve(cp, *idx as usize),
+        return match &cp.consts[i - 1] {
+            Const::Str(s) => s.clone(),
+            Const::Class(idx) => self.resolve(cp, *idx as usize),
             _ => {println!("Ritorno stringa vuota");String::new()}
         }
     }
@@ -78,20 +77,20 @@ impl Loader{
         for _ in 1..cp_count {
             if long_or_double {
                 long_or_double = false;
-                cp.consts.push(Const{tag: 0, data:Invalid});
+                cp.consts.push(Const::Invalid);
                 continue;
             }
             let tag = self.u1();
             let c: Const;
             match tag{
-                0x01 => c = Const{tag, data:ConstTypes::Str(String::from_utf8(self.vec_bytes_u2()).unwrap())},
-                0x03 => c = Const{tag, data:ConstTypes::Int(i32::from_be_bytes(self.bytes()))},
-                0x04 => c = Const{tag, data:ConstTypes::Float(f32::from_be_bytes(self.bytes()))},
-                0x06 => c = { long_or_double = true; Const{tag, data:Double(f64::from_be_bytes(self.bytes()))}},
-                0x07 => c = Const{tag, data:ConstTypes::Class(self.u2())},
-                0x08 => c = Const{tag, data:ConstTypes::StrIndex(self.u2())},
-                0x09|0xa => c = Const{tag, data:ConstTypes::FMIRef((self.u2(), self.u2()))},
-                0x0c => c = Const{tag, data:ConstTypes::NameAndType((self.u2(), self.u2()))},
+                0x01 => c = Const::Str(String::from_utf8(self.vec_bytes_u2()).unwrap()),
+                0x03 => c = Const::Int(i32::from_be_bytes(self.bytes())),
+                0x04 => c = Const::Float(f32::from_be_bytes(self.bytes())),
+                0x06 => c = { long_or_double = true; Const::Double(f64::from_be_bytes(self.bytes()))},
+                0x07 => c = Const::Class(self.u2()),
+                0x08 => c = Const::StrIndex(self.u2()),
+                0x09|0xa => c = Const::FMIRef((self.u2(), self.u2())),
+                0x0c => c = Const::NameAndType((self.u2(), self.u2())),
                 _all => {println!("Error parsing tag {}: Not implemented!", _all); continue;}
             }
             cp.consts.push(c);

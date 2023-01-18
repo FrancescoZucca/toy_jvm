@@ -7,7 +7,7 @@ use std::fs::{File};
 use std::collections::HashMap;
 use num_traits::FromPrimitive;
 use opcodes::Opcodes::*;
-use crate::types::{ArrayTypes, Attribute, ConstPool, ConstTypes, Field, MethodAccessFlags, Types};
+use crate::types::{ArrayTypes, Attribute, Const, ConstPool, Field, MethodAccessFlags, Types};
 use crate::loader::Loader;
 use crate::opcodes::Opcodes;
 use crate::Types::*;
@@ -189,16 +189,16 @@ impl Frame<'_>{
                     let idx = self.code[self.ip as usize + 1];
                     self.ip += 1;
 
-                    match self.class.cp.get(idx as u16).data {
-                        ConstTypes::Str(s) => { self.stack.push(Str(s)) }
-                        ConstTypes::Int(i) => { self.stack.push(Int(i)) }
-                        ConstTypes::Float(f) => { self.stack.push(Float(f)) }
-                        ConstTypes::Class(name_idx) => {
+                    match self.class.cp.get(idx as u16) {
+                        Const::Str(s) => { self.stack.push(Str(s)) }
+                        Const::Int(i) => { self.stack.push(Int(i)) }
+                        Const::Float(f) => { self.stack.push(Float(f)) }
+                        Const::Class(name_idx) => {
                             let class = L.get_class(L.resolve(&self.class.cp, name_idx as usize));
                             self.stack.push(Class(class.name.clone()));
                         }
-                        ConstTypes::FMIRef(fmi) => {
-                            let (clname, name, desc) = self.handle_fmi(ConstTypes::FMIRef(fmi));
+                        Const::FMIRef(fmi) => {
+                            let (clname, name, desc) = self.handle_fmi(Const::FMIRef(fmi));
                             unimplemented!()
                         }
                         _ => panic!()
@@ -206,11 +206,11 @@ impl Frame<'_>{
                 }
                 LDC2_W => {
                     let idx = u16::from_be_bytes(self.read_bytes());
-                    let val = &self.class.cp.consts[idx as usize - 1].data;
+                    let val = &self.class.cp.consts[idx as usize - 1];
                     println!("{:?}", val);
-                    if let ConstTypes::Double(i) = val{
+                    if let Const::Double(i) = val{
                         self.stack.push(Double(*i))
-                    }else if let ConstTypes::Long(l) = val{
+                    }else if let Const::Long(l) = val{
                         self.stack.push(Long(*l))
                     }else{
                         println!("Called LDC2_W on a NON-LONG! Ignoring...");
@@ -240,7 +240,7 @@ impl Frame<'_>{
                 GETFIELD => unsafe {
                     let idx = u16::from_be_bytes(self.read_bytes());
 
-                    let field = self.class.cp.get(idx).data;
+                    let field = self.class.cp.get(idx);
                     let (clname, fname, fdesc) = self.handle_fmi(field);
                     let cl = L.get_class(clname);
                     println!("{:?}", cl.fields);for field in &mut cl.fields{
@@ -255,10 +255,10 @@ impl Frame<'_>{
                     self.ip = self.ip + 2;
 
                     let field = self.class.cp.get(idx);
-                    if let ConstTypes::FMIRef((class_idx, nat_idx)) = field.data{
+                    if let Const::FMIRef((class_idx, nat_idx)) = field{
                         let nat = self.class.cp.get(nat_idx);
-                        if let ConstTypes::NameAndType((name_idx, typ_idx)) = nat.data {
-                            if let ConstTypes::Class(clname_idx) = self.class.cp.get(class_idx).data{
+                        if let Const::NameAndType((name_idx, typ_idx)) = nat {
+                            if let Const::Class(clname_idx) = self.class.cp.get(class_idx){
                                 let c = L.get_class(L.resolve(&mut self.class.cp, clname_idx as usize));
                                 let value = self.pop();
                                 if let Types::Class(name) = self.pop(){
@@ -287,7 +287,7 @@ impl Frame<'_>{
 
                     let field_ref = self.class.cp.get(idx);
                     println!("come");
-                    let (clname, fname, ftype) = self.handle_fmi(field_ref.data);
+                    let (clname, fname, ftype) = self.handle_fmi(field_ref);
                     println!("{}: {}-{}", clname, fname, ftype);
                     let class = L.get_class(clname);
                     for field in &class.fields{
@@ -299,11 +299,25 @@ impl Frame<'_>{
                         }
                     }
                 },
+                PUTSTATIC => unsafe{
+                    let idx = u16::from_be_bytes(self.read_bytes());
+                    self.class.cp.consts[idx as usize - 1] = match self.pop(){
+                        Int(i) => {Const::Int(i)}
+                        Boolean(i) => {Const::Int(if i {1} else {0})}
+                        Double(d) => {Const::Double(d)}
+                        Float(f) => {Const::Float(f)}
+                        Long(l) => {Const::Long(l)}
+                        Void => {Const::Invalid}
+                        Class(c) => {unimplemented!()}
+                        Array(a) => {unimplemented!()}
+                        Str(s) => {Const::Str(s)}
+                    };
+                },
                 INVOKEVIRTUAL => unsafe {
                     let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
                     self.ip = self.ip + 2;
 
-                    let method = self.class.cp.get(idx).data;
+                    let method = self.class.cp.get(idx);
                     let (clname, mname, typ) = self.handle_fmi(method);
                     println!("Resolving class {}..", clname);
                     let c = L.get_class(clname);
@@ -329,10 +343,10 @@ impl Frame<'_>{
                     self.ip = self.ip + 2;
 
                     let method = self.class.cp.get(idx);
-                    if let ConstTypes::FMIRef((class_idx, nat_idx)) = method.data{
+                    if let Const::FMIRef((class_idx, nat_idx)) = method{
                         let nat = self.class.cp.get(nat_idx);
-                        if let ConstTypes::NameAndType((name_idx, typ_idx)) = nat.data {
-                            if let ConstTypes::Class(clname_idx) = self.class.cp.get(class_idx).data{
+                        if let Const::NameAndType((name_idx, typ_idx)) = nat {
+                            if let Const::Class(clname_idx) = self.class.cp.get(class_idx){
 
                                 let clname = L.resolve(&mut self.class.cp, clname_idx as usize);
                                 println!("Resolving class {}..", clname);
@@ -369,10 +383,10 @@ impl Frame<'_>{
                     self.ip = self.ip + 2;
 
                     let method = self.class.cp.get(idx);
-                    if let ConstTypes::FMIRef((class_idx, nat_idx)) = method.data{
+                    if let Const::FMIRef((class_idx, nat_idx)) = method{
                         let nat = self.class.cp.get(nat_idx);
-                        if let ConstTypes::NameAndType((name_idx, typ_idx)) = nat.data {
-                            if let ConstTypes::Class(clname_idx) = self.class.cp.get(class_idx).data{
+                        if let Const::NameAndType((name_idx, typ_idx)) = nat {
+                            if let Const::Class(clname_idx) = self.class.cp.get(class_idx){
                                 //println!("{}, {}, {}", name_idx, typ_idx, clname_idx);
                                 //println!("{} {}, {}", self.class.cp.resolve(name), self.class.cp.resolve(typ), self.class.cp.resolve(clname));
 
@@ -410,7 +424,7 @@ impl Frame<'_>{
                     self.ip = self.ip + 2;
 
                     println!("...test");
-                    if let ConstTypes::Class(class_idx) = self.class.cp.get(idx).data {
+                    if let Const::Class(class_idx) = self.class.cp.get(idx) {
                         let class = L.get_class(L.resolve(&mut self.class.cp, class_idx as usize));
                         self.stack.push(Types::Class(class.name.clone()))
                     }else{
@@ -444,12 +458,12 @@ impl Frame<'_>{
         return if let Double(f) = self.pop(){f}else{panic!("Expected double on the stack")}
     }
 
-    fn handle_fmi(&self, fmi_ref: ConstTypes) -> (String, String, String){
-        if let ConstTypes::FMIRef((class_idx, nat_idx)) = fmi_ref{
-            let nat = self.class.cp.get(nat_idx).data;
-            if let ConstTypes::NameAndType((name_idx, type_idx)) = nat{
-                let class = self.class.cp.get(class_idx).data;
-                if let ConstTypes::Class(clname_idx) = class {
+    fn handle_fmi(&self, fmi_ref: Const) -> (String, String, String){
+        if let Const::FMIRef((class_idx, nat_idx)) = fmi_ref{
+            let nat = self.class.cp.get(nat_idx);
+            if let Const::NameAndType((name_idx, type_idx)) = nat{
+                let class = self.class.cp.get(class_idx);
+                if let Const::Class(clname_idx) = class {
                     unsafe{
                         let clname = L.resolve(&self.class.cp, clname_idx as usize);
                         let name = L.resolve(&self.class.cp, name_idx as usize);

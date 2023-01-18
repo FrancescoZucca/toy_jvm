@@ -13,12 +13,6 @@ pub enum ArrayTypes{
 }
 
 #[derive(Debug, Clone)]
-pub struct Const{
-    pub tag: u8,
-    pub data: ConstTypes
-}
-
-#[derive(Debug, Clone)]
 pub struct Field{
     pub flags: u16,
     pub name: String,
@@ -34,7 +28,7 @@ pub struct Attribute{
 }
 
 #[derive(Debug, Clone)]
-pub enum ConstTypes{
+pub enum Const{
     Str(String),
     Int(i32),
     Float(f32),
