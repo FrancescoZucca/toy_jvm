@@ -242,9 +242,10 @@ impl Frame<'_>{
 
                     let field = self.class.cp.get(idx);
                     let (clname, fname, fdesc) = self.handle_fmi(field);
-                    let cl = L.get_class(clname);
+                    let cl = L.get_class(clname.clone());
                     println!("{:?}", cl.fields);for field in &mut cl.fields{
                         if field.name == fname && field.desc == fdesc{
+                            println!("{}::{}-{} = {:?}", clname, fname, fdesc, field.value.clone());
                             self.stack.push(field.value.borrow_mut().clone().unwrap());
                             break;
                         }
