@@ -281,12 +281,9 @@ impl Frame<'_>{
                     }
                 },
                 GETSTATIC => unsafe{ //TODO: Properly initialise values.
-                    println!("{}", self.class.name);
                     let idx = u16::from_be_bytes(self.read_bytes());
-                    println!("sus {} out of {}", idx, self.class.cp.consts.len());
 
                     let field_ref = self.class.cp.get(idx);
-                    println!("come");
                     let (clname, fname, ftype) = self.handle_fmi(field_ref);
                     println!("{}: {}-{}", clname, fname, ftype);
                     let class = L.get_class(clname);
@@ -301,17 +298,14 @@ impl Frame<'_>{
                 },
                 PUTSTATIC => unsafe{
                     let idx = u16::from_be_bytes(self.read_bytes());
-                    self.class.cp.consts[idx as usize - 1] = match self.pop(){
-                        Int(i) => {Const::Int(i)}
-                        Boolean(i) => {Const::Int(if i {1} else {0})}
-                        Double(d) => {Const::Double(d)}
-                        Float(f) => {Const::Float(f)}
-                        Long(l) => {Const::Long(l)}
-                        Void => {Const::Invalid}
-                        Class(c) => {unimplemented!()}
-                        Array(a) => {unimplemented!()}
-                        Str(s) => {Const::Str(s)}
-                    };
+                    let (clname, fname, ftype) = self.handle_fmi(self.class.cp.get(idx));
+                    let cl = L.get_class(clname);
+                    for field in &mut cl.fields{
+                        if field.name == fname && field.desc == ftype{
+                            field.value = Some(self.pop());
+                            break;
+                        }
+                    }
                 },
                 INVOKEVIRTUAL => unsafe {
                     let idx = u16::from_be_bytes([self.code[self.ip as usize+1], self.code[self.ip as usize+2]]);
